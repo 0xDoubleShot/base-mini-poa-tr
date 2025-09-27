@@ -2,38 +2,63 @@ import { useState } from "react";
 import { ethers } from "ethers";
 import abi from "../lib/abi";
 
-// window.ethereum tipi
 declare global {
   interface Window {
     ethereum?: any;
   }
 }
 
-/** Base Sepolia ağı ekleme/switch helper (84532 = 0x14a34) */
-async function ensureBaseSepolia(provider: ethers.BrowserProvider) {
-  const targetChainId = 84532;
-  const targetChainHex = "0x14a34";
+/** Uygun sağlayıcıyı (MetaMask/Rabby) seç */
+function pickEOAProvider(): any {
+  const eth = window.ethereum as any;
+  if (!eth) return null;
 
-  // Mevcut ağ
-  const network = await provider.getNetwork();
-  if (Number(network.chainId) === targetChainId) return;
+  // EIP-6963 / multiple providers
+  if (Array.isArray(eth.providers) && eth.providers.length) {
+    // Öncelik: Rabby → MetaMask
+    const rabby = eth.providers.find((p: any) => p?.isRabby);
+    if (rabby) return rabby;
+    const metamask = eth.providers.find((p: any) => p?.isMetaMask);
+    if (metamask) return metamask;
+    // Coinbase internal vs classic ayrımı yoksa EOA olmayanı ele
+    const nonCBW = eth.providers.find((p: any) => !p?.isCoinbaseWallet);
+    if (nonCBW) return nonCBW;
+    return eth.providers[0];
+  }
 
-  // Switch dene, yoksa ekle
+  // Tek sağlayıcı durumda: MetaMask/Rabby tercih et, Coinbase ise uyar
+  if (eth.isCoinbaseWallet && !eth.isMetaMask && !eth.isRabby) {
+    return null; // internal account'a düşmeyelim
+  }
+  return eth;
+}
+
+/** Base Sepolia (84532 = 0x14a34) ekleme/switch */
+async function ensureBaseSepolia(rawProvider: any) {
+  const chainHex = "0x14a34";
   try {
-    await provider.send("wallet_switchEthereumChain", [{ chainId: targetChainHex }]);
-  } catch (switchErr: any) {
-    // 4902 vb. ekli değil: ağ ekle
-    await provider.send("wallet_addEthereumChain", [
-      {
-        chainId: targetChainHex,
+    const cur = await rawProvider.request({ method: "eth_chainId" });
+    if (cur?.toLowerCase() === chainHex) return;
+    await rawProvider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: chainHex }]
+    });
+  } catch (err: any) {
+    // ekli değilse
+    await rawProvider.request({
+      method: "wallet_addEthereumChain",
+      params: [{
+        chainId: chainHex,
         chainName: "Base Sepolia",
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
         rpcUrls: ["https://sepolia.base.org"],
         blockExplorerUrls: ["https://sepolia.basescan.org"]
-      }
-    ]);
-    // ekledikten sonra tekrar switch
-    await provider.send("wallet_switchEthereumChain", [{ chainId: targetChainHex }]);
+      }]
+    });
+    await rawProvider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: chainHex }]
+    });
   }
 }
 
@@ -44,39 +69,31 @@ export default function Home() {
   async function mint() {
     setStatus("");
     setBusy(true);
-
     try {
-      if (!window.ethereum) {
-        setStatus("❌ Cüzdan bulunamadı (Metamask/Rabby).");
+      const raw = pickEOAProvider();
+      if (!raw) {
+        setStatus("❌ Lütfen MetaMask veya Rabby (EOA) kullan. Coinbase Smart Wallet internal account ile contract çağrısı engellenir.");
         return;
       }
 
-      // EOA kullan (MetaMask/Rabby). Coinbase Smart Wallet ile contract data gönderilemez.
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      await provider.send("eth_requestAccounts", []);
-      await ensureBaseSepolia(provider);
+      await raw.request({ method: "eth_requestAccounts" });
+      await ensureBaseSepolia(raw);
 
+      const provider = new ethers.BrowserProvider(raw);
       const signer = await provider.getSigner();
 
-      // Kontrat (senin deploy adresin)
       const CONTRACT_ADDRESS = "0xF0FAD4DF546c8A04911DCC1ECE5043FbfE719791";
       const contract = new ethers.Contract(CONTRACT_ADDRESS, abi, signer);
 
-      // İşlem gönder
       setStatus("📤 İşlem gönderiliyor…");
-      const tx = await contract.mintPOA(); // gas ayarı otomatik
+      const tx = await contract.mintPOA();
       setStatus(`⏳ Onay bekleniyor… (tx: ${tx.hash.slice(0, 10)}...)`);
       const receipt = await tx.wait();
-
       setStatus(`✅ Mint başarılı! Block: ${receipt.blockNumber}`);
-    } catch (err: any) {
-      // Coinbase Smart Wallet/internal account hatası veya user reject vb.
-      const msg =
-        err?.message ||
-        err?.error?.message ||
-        (typeof err === "string" ? err : "unknown error");
+    } catch (e: any) {
+      const msg = e?.message || e?.error?.message || "unknown error";
       setStatus(`❌ Hata: ${msg}`);
-      console.error(err);
+      console.error(e);
     } finally {
       setBusy(false);
     }
@@ -86,19 +103,13 @@ export default function Home() {
     <div style={{ padding: 24, fontFamily: "system-ui, sans-serif" }}>
       <h1>Base Mini App — Proof of Attendance</h1>
       <p>Click the button to mint your Attendance NFT on Base Sepolia.</p>
-
       <button
         onClick={mint}
         disabled={busy}
-        style={{
-          padding: "12px 16px",
-          cursor: busy ? "not-allowed" : "pointer",
-          opacity: busy ? 0.7 : 1
-        }}
+        style={{ padding: "12px 16px", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.7 : 1 }}
       >
         {busy ? "Processing..." : "Mint Attendance NFT"}
       </button>
-
       <p style={{ marginTop: 12, whiteSpace: "pre-wrap" }}>{status}</p>
     </div>
   );
