@@ -8,7 +8,8 @@ contract POA is ERC721, Ownable {
     uint256 public nextId;
     mapping(address => bool) public claimed;
 
-    constructor() ERC721("ProofOfAttendance", "POA") {}
+    // OZ v5: Ownable artık initialOwner ister
+    constructor() ERC721("ProofOfAttendance", "POA") Ownable(msg.sender) {}
 
     function mintPOA() external {
         require(!claimed[msg.sender], "Already claimed");
@@ -17,4 +18,3 @@ contract POA is ERC721, Ownable {
         nextId++;
     }
 }
-
