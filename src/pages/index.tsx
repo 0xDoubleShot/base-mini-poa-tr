@@ -1,26 +1,30 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { ethers } from "ethers";
 import abi from "../lib/abi";
 
 declare global { interface Window { ethereum?: any } }
 
-type ProviderChoice = "metamask";
+/** MetaMask sağlayıcısını seç (Coinbase'i reddet) */
+function getMetaMaskProvider(): any | null {
+  const eth = typeof window !== "undefined" ? (window as any).ethereum : null;
+  if (!eth) return null;
 
-function getAllProviders(): any[] {
-  const eth = (typeof window !== "undefined" ? window.ethereum : undefined) as any;
-  if (!eth) return [];
-  if (Array.isArray(eth.providers)) return eth.providers;
-  return [eth].filter(Boolean);
+  // EIP-6963: birden fazla sağlayıcı varsa
+  if (Array.isArray(eth.providers) && eth.providers.length) {
+    // isCoinbaseWallet olanları at
+    const filtered = eth.providers.filter((p: any) => !p?.isCoinbaseWallet);
+    const mm = filtered.find((p: any) => p?.isMetaMask && !p?.isBraveWallet);
+    return mm ?? filtered[0] ?? null;
+  }
+
+  // Tek sağlayıcı varsa; Coinbase ise reddet
+  if (eth.isCoinbaseWallet && !eth.isMetaMask) return null;
+  return eth;
 }
-function pickProvider(choice: ProviderChoice) {
-  const list = getAllProviders();
-  // Coinbase sağlayıcılarını tamamen hariç tut
-  const filtered = list.filter((p) => !p?.isCoinbaseWallet);
-  if (choice === "metamask") return filtered.find((p) => p?.isMetaMask && !p?.isBraveWallet) ?? null;
-  return null;
-}
+
+/** Base Sepolia (84532 = 0x14a34) ekleme/switch */
 async function ensureBaseSepolia(raw: any) {
-  const chainHex = "0x14a34"; // 84532
+  const chainHex = "0x14a34";
   try {
     const cur = await raw.request({ method: "eth_chainId" });
     if (cur?.toLowerCase() === chainHex) return;
@@ -46,36 +50,16 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
   const [account, setAccount] = useState<string>("-");
   const [chainId, setChainId] = useState<string>("-");
-  const [providerInfo, setProviderInfo] = useState<any[]>([]);
-
-  const provFlags = useMemo(() => {
-    const list = getAllProviders();
-    setProviderInfo(list.map(p => ({
-      isMetaMask: !!p?.isMetaMask,
-      isCoinbaseWallet: !!p?.isCoinbaseWallet,
-      isRabby: !!p?.isRabby
-    })));
-    return {
-      hasMetaMask: !!list.find((p) => p?.isMetaMask && !p?.isBraveWallet),
-      onlyCoinbase: list.length > 0 && list.every((p) => p?.isCoinbaseWallet),
-      count: list.length
-    };
-  }, []);
-
-  useEffect(() => {
-    if (provFlags.onlyCoinbase) {
-      setStatus("⚠️ Sadece Coinbase provider algılandı. Lütfen uzantıyı devre dışı bırakıp sadece MetaMask ile deneyin.");
-    }
-  }, [provFlags.onlyCoinbase]);
 
   async function connectMetaMask() {
     try {
       setStatus("");
-      const raw = pickProvider("metamask");
+      const raw = getMetaMaskProvider();
       if (!raw) {
-        setStatus("❌ MetaMask bulunamadı. (Diğer cüzdanları devre dışı bırakın ve sayfayı yenileyin.)");
+        setStatus("❌ MetaMask bulunamadı. (Diğer cüzdanları devre dışı bırakın, sadece MetaMask açık kalsın.)");
         return;
       }
+
       await raw.request({ method: "eth_requestAccounts" });
       await ensureBaseSepolia(raw);
 
@@ -83,22 +67,23 @@ export default function Home() {
       const signer = await provider.getSigner();
       const addr = await signer.getAddress();
       const ch = await provider.send("eth_chainId", []);
+
       setAccount(addr);
       setChainId(ch);
       setConnected(true);
       setStatus(`✅ Bağlandı: ${addr.slice(0,6)}…${addr.slice(-4)} | chainId=${ch}`);
-    } catch (e:any) {
+    } catch (e: any) {
       setStatus(`❌ Bağlantı hatası: ${e?.message || "unknown"}`);
       console.error(e);
     }
   }
 
   async function mint() {
-    setStatus("");
     setBusy(true);
+    setStatus("");
     try {
       if (!connected) { setStatus("❌ Önce MetaMask bağlayın."); return; }
-      const raw = pickProvider("metamask");
+      const raw = getMetaMaskProvider();
       if (!raw) { setStatus("❌ MetaMask yok."); return; }
 
       const provider = new ethers.BrowserProvider(raw);
@@ -112,10 +97,12 @@ export default function Home() {
       const tx = await contract.mintPOA();
       const rc = await tx.wait();
       setStatus(`✅ Mint OK. Block=${rc.blockNumber}`);
-    } catch (e:any) {
+    } catch (e: any) {
       setStatus(`❌ Hata: ${e?.message || e?.error?.message || "unknown"}`);
       console.error(e);
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -123,20 +110,16 @@ export default function Home() {
       <h1>Base Mini App — Proof of Attendance</h1>
       <p>Click the button to mint your Attendance NFT on Base Sepolia.</p>
 
-      <div style={{margin:"8px 0", fontSize:14}}>
-        <div>Detected providers: {provFlags.count}</div>
-        <pre style={{background:"#f6f6f6", padding:8}}>
-{JSON.stringify(providerInfo, null, 2)}
-        </pre>
+      {/* BUTONLAR ARTIK HER ZAMAN TIKLANABİLİR */}
+      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
+        <button onClick={connectMetaMask} disabled={busy} style={{ padding: "10px 14px" }}>
+          Connect MetaMask
+        </button>
       </div>
-
-      <button onClick={connectMetaMask} disabled={busy} style={{ padding: "10px 14px", marginRight: 8 }}>
-        Connect MetaMask
-      </button>
 
       <div style={{ margin: "8px 0" }}>Account: {account} | chainId: {chainId}</div>
 
-      <button onClick={mint} disabled={!connected || busy} style={{ padding: "12px 16px" }}>
+      <button onClick={mint} disabled={busy || !connected} style={{ padding: "12px 16px" }}>
         {busy ? "Processing..." : "Mint Attendance NFT"}
       </button>
 
