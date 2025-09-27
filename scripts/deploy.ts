@@ -1,3 +1,4 @@
+// scripts/deploy.ts
 import hre from "hardhat";
 
 async function main() {
