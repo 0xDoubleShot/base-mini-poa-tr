@@ -22,7 +22,7 @@ export default function Home() {
       const signer = await provider.getSigner();
 
       const contract = new ethers.Contract(
-        "0xYOUR_DEPLOYED_ADDRESS", // deploy sonrası güncelle
+        "0xF0FAD4DF546c8A04911DCC1ECE5043FbfE719791", // deploy sonrası güncelle
         abi,
         signer
       );
