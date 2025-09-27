@@ -1,15 +1,13 @@
-import { ethers } from "hardhat";
+import hre from "hardhat";
 
 async function main() {
-  const Factory = await ethers.getContractFactory("POA");
+  const Factory = await hre.ethers.getContractFactory("POA");
   const contract = await Factory.deploy();
   await contract.waitForDeployment();
-  const addr = await contract.getAddress();
-  console.log("POA deployed to:", addr);
+  console.log("POA deployed to:", await contract.getAddress());
 }
 
 main().catch((e) => {
   console.error(e);
   process.exitCode = 1;
 });
-
