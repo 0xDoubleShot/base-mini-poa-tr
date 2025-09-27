@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ethers } from "ethers";
 import abi from "../lib/abi";
 
@@ -8,44 +8,34 @@ declare global {
   }
 }
 
-/** Uygun sağlayıcıyı (MetaMask/Rabby) seç */
-function pickEOAProvider(): any {
-  const eth = window.ethereum as any;
-  if (!eth) return null;
+type ProviderChoice = "metamask" | "rabby" | null;
 
-  // EIP-6963 / multiple providers
-  if (Array.isArray(eth.providers) && eth.providers.length) {
-    // Öncelik: Rabby → MetaMask
-    const rabby = eth.providers.find((p: any) => p?.isRabby);
-    if (rabby) return rabby;
-    const metamask = eth.providers.find((p: any) => p?.isMetaMask);
-    if (metamask) return metamask;
-    // Coinbase internal vs classic ayrımı yoksa EOA olmayanı ele
-    const nonCBW = eth.providers.find((p: any) => !p?.isCoinbaseWallet);
-    if (nonCBW) return nonCBW;
-    return eth.providers[0];
-  }
-
-  // Tek sağlayıcı durumda: MetaMask/Rabby tercih et, Coinbase ise uyar
-  if (eth.isCoinbaseWallet && !eth.isMetaMask && !eth.isRabby) {
-    return null; // internal account'a düşmeyelim
-  }
-  return eth;
+// Tüm provider'ları topla (EIP-6963 uyumlu)
+function getAllProviders(): any[] {
+  const eth = (typeof window !== "undefined" ? window.ethereum : undefined) as any;
+  if (!eth) return [];
+  if (Array.isArray(eth.providers)) return eth.providers;
+  return [eth].filter(Boolean);
 }
 
-/** Base Sepolia (84532 = 0x14a34) ekleme/switch */
-async function ensureBaseSepolia(rawProvider: any) {
+// Seçime göre provider getir
+function pickProvider(choice: ProviderChoice) {
+  const list = getAllProviders();
+  if (!list.length) return null;
+  if (choice === "rabby") return list.find((p) => p?.isRabby) ?? null;
+  if (choice === "metamask") return list.find((p) => p?.isMetaMask && !p?.isBraveWallet) ?? null;
+  return null;
+}
+
+// Base Sepolia (84532 = 0x14a34) ekleme/switch
+async function ensureBaseSepolia(raw: any) {
   const chainHex = "0x14a34";
   try {
-    const cur = await rawProvider.request({ method: "eth_chainId" });
+    const cur = await raw.request({ method: "eth_chainId" });
     if (cur?.toLowerCase() === chainHex) return;
-    await rawProvider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: chainHex }]
-    });
-  } catch (err: any) {
-    // ekli değilse
-    await rawProvider.request({
+    await raw.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex }] });
+  } catch {
+    await raw.request({
       method: "wallet_addEthereumChain",
       params: [{
         chainId: chainHex,
@@ -55,30 +45,63 @@ async function ensureBaseSepolia(rawProvider: any) {
         blockExplorerUrls: ["https://sepolia.basescan.org"]
       }]
     });
-    await rawProvider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: chainHex }]
-    });
+    await raw.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex }] });
   }
 }
 
 export default function Home() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [choice, setChoice] = useState<ProviderChoice>(null);
+  const [connected, setConnected] = useState(false);
+
+  const providers = useMemo(() => {
+    const ps = getAllProviders();
+    return {
+      hasMetaMask: !!ps.find((p) => p?.isMetaMask && !p?.isBraveWallet),
+      hasRabby: !!ps.find((p) => p?.isRabby),
+      onlyCoinbase: ps.length > 0 && ps.every((p) => p?.isCoinbaseWallet)
+    };
+  }, []);
+
+  useEffect(() => {
+    if (providers.onlyCoinbase) {
+      setStatus("⚠️ Coinbase Smart Wallet (internal) algılandı. Lütfen MetaMask veya Rabby kullanın (EOA).");
+    }
+  }, [providers.onlyCoinbase]);
+
+  async function connectWallet(target: ProviderChoice) {
+    try {
+      setStatus("");
+      const raw = pickProvider(target);
+      if (!raw) {
+        setStatus("❌ Seçtiğiniz cüzdan bulunamadı. MetaMask veya Rabby yükleyin.");
+        return;
+      }
+      await raw.request({ method: "eth_requestAccounts" });
+      await ensureBaseSepolia(raw);
+      setChoice(target);
+      setConnected(true);
+      setStatus("✅ Cüzdan bağlandı ve Base Sepolia seçildi.");
+    } catch (e: any) {
+      setStatus(`❌ Bağlantı hatası: ${e?.message || "unknown"}`);
+      console.error(e);
+    }
+  }
 
   async function mint() {
     setStatus("");
     setBusy(true);
     try {
-      const raw = pickEOAProvider();
-      if (!raw) {
-        setStatus("❌ Lütfen MetaMask veya Rabby (EOA) kullan. Coinbase Smart Wallet internal account ile contract çağrısı engellenir.");
+      if (!connected || !choice) {
+        setStatus("❌ Önce cüzdan seçip bağlayın.");
         return;
       }
-
-      await raw.request({ method: "eth_requestAccounts" });
-      await ensureBaseSepolia(raw);
-
+      const raw = pickProvider(choice);
+      if (!raw) {
+        setStatus("❌ Cüzdan bulunamadı.");
+        return;
+      }
       const provider = new ethers.BrowserProvider(raw);
       const signer = await provider.getSigner();
 
@@ -91,8 +114,7 @@ export default function Home() {
       const receipt = await tx.wait();
       setStatus(`✅ Mint başarılı! Block: ${receipt.blockNumber}`);
     } catch (e: any) {
-      const msg = e?.message || e?.error?.message || "unknown error";
-      setStatus(`❌ Hata: ${msg}`);
+      setStatus(`❌ Hata: ${e?.message || e?.error?.message || "unknown"}`);
       console.error(e);
     } finally {
       setBusy(false);
@@ -103,13 +125,34 @@ export default function Home() {
     <div style={{ padding: 24, fontFamily: "system-ui, sans-serif" }}>
       <h1>Base Mini App — Proof of Attendance</h1>
       <p>Click the button to mint your Attendance NFT on Base Sepolia.</p>
+
+      <div style={{ margin: "12px 0", display: "flex", gap: 8 }}>
+        <button
+          onClick={() => connectWallet("metamask")}
+          disabled={!providers.hasMetaMask || busy}
+          title={providers.hasMetaMask ? "Connect MetaMask" : "MetaMask not detected"}
+          style={{ padding: "10px 14px" }}
+        >
+          Connect MetaMask
+        </button>
+        <button
+          onClick={() => connectWallet("rabby")}
+          disabled={!providers.hasRabby || busy}
+          title={providers.hasRabby ? "Connect Rabby" : "Rabby not detected"}
+          style={{ padding: "10px 14px" }}
+        >
+          Connect Rabby
+        </button>
+      </div>
+
       <button
         onClick={mint}
-        disabled={busy}
-        style={{ padding: "12px 16px", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.7 : 1 }}
+        disabled={!connected || busy}
+        style={{ padding: "12px 16px", cursor: (!connected || busy) ? "not-allowed" : "pointer", opacity: (!connected || busy) ? 0.7 : 1 }}
       >
         {busy ? "Processing..." : "Mint Attendance NFT"}
       </button>
+
       <p style={{ marginTop: 12, whiteSpace: "pre-wrap" }}>{status}</p>
     </div>
   );
